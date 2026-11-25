@@ -11,6 +11,12 @@ import { themeService, type ThemePreference } from '@/services/themeService';
  * that preferences are persisted locally and, when a local override is
  * absent, hydrated from the backend.
  *
+ * Resolution order:
+ * 1. Stored manual override (light/dark)
+ * 2. OS preference (via system media query)
+ * 3. Backend preference
+ * 4. Default (light)
+ *
  * Follows the Component → Hook → Service pattern:
  *   ThemeToggle (component) → useTheme (hook) → themeService (service)
  */
@@ -20,27 +26,45 @@ export function useTheme() {
   // On load, prefer a stored local override; otherwise fall back to the
   // authoritative backend preference.
   useEffect(() => {
-    const storedPreference = themeService.getStoredThemePreference();
-    if (storedPreference) {
-      setTheme(storedPreference);
-      return;
-    }
+    const initializeTheme = async () => {
+      const storedPreference = themeService.getStoredThemePreference();
+      
+      if (storedPreference) {
+        // Use stored manual override
+        setTheme(storedPreference);
+        return;
+      }
 
-    let cancelled = false;
-    themeService
-      .getThemePreference()
-      .then(({ theme: apiTheme }) => {
+      // No manual override, so listen for OS theme changes
+      const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+      
+      const handleOSThemeChange = (e: MediaQueryListEvent) => {
+        setTheme(e.matches ? 'dark' : 'light');
+      };
+
+      mediaQuery.addEventListener('change', handleOSThemeChange);
+
+      // Fetch backend preference as secondary fallback
+      let cancelled = false;
+
+      try {
+        const { theme: apiTheme } = await themeService.getThemePreference();
         if (!cancelled) {
           setTheme(apiTheme);
         }
-      })
-      .catch(() => {
+      } catch (error) {
         // Fall back to the system/default theme when the API is unavailable.
-      });
+        console.warn('Failed to fetch theme preference from backend:', error);
+        // OS preference is already applied by next-themes
+      }
 
-    return () => {
-      cancelled = true;
+      return () => {
+        cancelled = true;
+        mediaQuery.removeEventListener('change', handleOSThemeChange);
+      };
     };
+
+    return initializeTheme().then((cleanup) => cleanup);
   }, [setTheme]);
 
   const toggleTheme = useCallback(async () => {
@@ -51,8 +75,9 @@ export function useTheme() {
 
     try {
       await themeService.saveThemePreference(nextTheme);
-    } catch {
+    } catch (error) {
       // Persistence failures must not break the UI toggle.
+      console.warn('Failed to save theme preference:', error);
     }
   }, [resolvedTheme, setTheme]);
 
